@@ -1,27 +1,25 @@
-# bicom-github-actions
+# aws-deploy-actions
 
-Skill de agente para escribir, migrar y revisar los workflows de deploy de los repos
-`bicom/github` en AWS: build de imagen, push a ECR y despliegue a ECS, a una Lambda de
-contenedor o solo a ECR.
-
-Destilada de los 45 workflows existentes; los de referencia son `bicom-ms-stock-closing`
-(ECS) y `bicom-ms-stock-closing-lambda-cron` (Lambda).
+Skill de agente para escribir, migrar y revisar workflows de GitHub Actions que construyen
+una imagen Docker, la suben a ECR y la despliegan en AWS: servicio ECS, Lambda de
+contenedor, o solo publicación de la imagen.
 
 ```
-SKILL.md                     reglas, decisiones y deuda conocida
-templates/ecs-service.yml    servicio ECS  (secretos -> .env, tag por SHA, cache gha)
+SKILL.md                     reglas, decisiones y errores que solo aparecen en producción
+templates/ecs-service.yml    servicio ECS (secretos -> .env, tag por SHA, cache gha)
 templates/lambda.yml         Lambda de contenedor (arm64, provenance=false, wait)
 templates/ecr-image.yml      imagen base: solo build + push a ECR
-reference/inventario.md      los 45 deploys: rama, ECR, cluster, servicio, TD, secreto
+reference/auditoria.md       comandos para auditar workflows existentes
 ```
+
+Las plantillas usan `<placeholders>` para todo lo que cambia por organización (región,
+cuenta, nombres de secrets y canales, convención de nombres de recursos). La skill explica
+de dónde sacar cada valor antes de escribir nada.
 
 ## Instalar en un repo
 
-Igual que `docker-golang-skills`: se copia en `.agents/skills/` (y se referencia en
-`skills-lock.json`), o se apunta el agente a este repo.
-
 ```bash
-git clone <este-repo> .agents/skills/bicom-github-actions
+git clone <este-repo> .agents/skills/aws-deploy-actions
 ```
 
 ## Complementa a

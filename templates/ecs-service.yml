@@ -1,6 +1,5 @@
 # Copiar a .github/workflows/production.yml (o deploy.yml, según la convención del repo).
 # Destino: servicio ECS. Build -> ECR -> nueva revisión de task definition -> update del servicio.
-# Referencia viva: bicom-ms-stock-closing.
 name: Deploy <Nombre legible del servicio>
 
 on:
@@ -13,20 +12,18 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AWS_REGION: us-east-2
-  AWS_ACCOUNT_ID: "701355173252"
+  AWS_REGION: <region>
   ECR_REPOSITORY: <repo-ecr>
-  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CHANNEL_BICOM }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
   # ARN completo con sufijo: sácalo de `aws secretsmanager list-secrets`.
-  # Los consumers comparten prod/bicom/consumers-NMjPni; las APIs tienen el suyo.
-  SECRET_ARN: arn:aws:secretsmanager:us-east-2:701355173252:secret:<ruta-sufijo>
+  SECRET_ARN: arn:aws:secretsmanager:<region>:<cuenta>:secret:<nombre-con-sufijo>
   ENV_FILE: .env
-  ECS_CLUSTER: <BICOM-CONSUMERS-ARM|BICOM-ECS-APIs|BICOM-ECS-WEB-01|BICOM-CONTABILIDAD|BICOM-DTE>
-  ECS_SERVICE: <BICOM-SERVICE-...>
-  ECS_TASK_DEFINITION: <BICOM-TD-...>
+  ECS_CLUSTER: <cluster>
+  ECS_SERVICE: <servicio>
+  ECS_TASK_DEFINITION: <familia-task-definition>
   # Nombre del contenedor DENTRO de la task definition (en los repos PHP suele ser `php-fpm`).
   # Si no coincide, el render no reemplaza la imagen y el deploy queda verde sin desplegar nada.
-  CONTAINER_NAME: <CNT-...>
+  CONTAINER_NAME: <nombre-del-contenedor>
   # Tiene que ser el mismo cpuArchitecture de la task definition, no el del cluster.
   PLATFORM: linux/arm64
 
@@ -45,7 +42,7 @@ jobs:
       - name: Send GitHub Action data to a Slack workflow
         uses: act10ns/slack@v2
         with:
-          channel: "#github-actions-bicom-oficial"
+          channel: "<#canal-inicio>"
           status: starting
           message: Starting Deploy <servicio>
         if: always()
@@ -156,5 +153,5 @@ jobs:
         with:
           status: ${{ job.status }}
           steps: ${{ toJson(steps) }}
-          channel: "#workflows"
+          channel: "<#canal-final>"
         if: always()

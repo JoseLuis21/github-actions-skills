@@ -1,7 +1,7 @@
 # Copiar a .github/workflows/<rama>-deploy.yml
 # Destino: solo ECR. Imágenes base que otros repos consumen con FROM (php-fpm, nginx,
-# conta-php-fpm) o imágenes que despliega otro proceso. No hay ECS ni Lambda que tocar.
-# Referencia viva: bicom-imagen-base-php-fpm (una rama = un tag = un workflow).
+# runtimes internos) o imágenes que despliega otro proceso. No hay ECS ni Lambda que tocar.
+# Convención habitual: una rama por variante y el tag con el mismo nombre.
 name: Deploy <Nombre de la imagen> - <VARIANTE>
 
 on:
@@ -14,10 +14,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AWS_REGION: us-east-2
-  AWS_ACCOUNT_ID: "701355173252"
+  AWS_REGION: <region>
   ECR_REPOSITORY: <repo-ecr>
-  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CHANNEL_BICOM }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
   # El tag ES el contrato con los repos que hacen FROM: una rama por variante y el
   # tag con el mismo nombre. Cambiarlo rompe el build de todos los consumidores.
   IMAGE_TAG: <production|beta|alpine|control|tenant|master>
@@ -38,7 +37,7 @@ jobs:
       - name: Send GitHub Action data to a Slack workflow
         uses: act10ns/slack@v2
         with:
-          channel: "#github-actions-bicom-oficial"
+          channel: "<#canal-inicio>"
           status: starting
           message: Starting Deploy <imagen> <variante>
         if: always()
@@ -75,7 +74,7 @@ jobs:
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # New Relic y demás van como `vars`, no como secrets, en los repos php-fpm:
+          # Valores no sensibles (versiones, nombres de app) van como `vars`, no como secrets:
           # build-args: |
           #   NEW_RELIC_APP_NAME=${{ vars.NEW_RELIC_APP_NAME_PROD }}
           #   NEW_RELIC_LICENSE_KEY=${{ vars.NEW_RELIC_LICENSE_KEY_PROD }}
@@ -86,5 +85,5 @@ jobs:
         with:
           status: ${{ job.status }}
           steps: ${{ toJson(steps) }}
-          channel: "#workflows"
+          channel: "<#canal-final>"
         if: always()

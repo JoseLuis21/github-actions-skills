@@ -1,6 +1,6 @@
 # Copiar a .github/workflows/production.yml
 # Destino: AWS Lambda como imagen de contenedor. Build de UNA arquitectura -> ECR ->
-# update-function-code. Referencia viva: bicom-ms-stock-closing-lambda-cron.
+# update-function-code.
 name: Deploy <Nombre legible de la lambda>
 
 on:
@@ -13,11 +13,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AWS_REGION: us-east-2
-  AWS_ACCOUNT_ID: "701355173252"
+  AWS_REGION: <region>
   ECR_REPOSITORY: <repo-ecr>
-  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CHANNEL_BICOM }}
-  LAMBDA_ARN: arn:aws:lambda:us-east-2:701355173252:function:<bicom-lambda-...>
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+  LAMBDA_ARN: arn:aws:lambda:<region>:<cuenta>:function:<nombre-funcion>
   # arm64 = Graviton (~20% más barato). Si la función existente es x86_64, migrarla
   # es un cambio aparte: cambia esto Y la base del Dockerfile a la vez.
   ARCH: arm64
@@ -37,7 +36,7 @@ jobs:
       - name: Send GitHub Action data to a Slack workflow
         uses: act10ns/slack@v2
         with:
-          channel: "#github-actions-bicom-oficial"
+          channel: "<#canal-inicio>"
           status: starting
           message: Starting Deploy <lambda>
         if: always()
@@ -114,5 +113,5 @@ jobs:
         with:
           status: ${{ job.status }}
           steps: ${{ toJson(steps) }}
-          channel: "#workflows"
+          channel: "<#canal-final>"
         if: always()

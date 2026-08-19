@@ -1,98 +1,90 @@
 ---
 name: github-actions-skills
-description: Escribe, migra o revisa el workflow de deploy de un repo bicom en AWS (us-east-2, cuenta 701355173252) — build de imagen, push a ECR y despliegue a un servicio ECS, a una Lambda de contenedor o solo a ECR (imágenes base). Úsala cuando pidan crear el `.github/workflows/*.yml` de un microservicio/API/consumer/lambda de bicom, clonar el deploy de otro repo bicom, pasar un deploy a ARM64/Graviton, arreglar un deploy que quedó viejo (`::set-output`, sin cache, sin tag por SHA, doble `docker login`), añadir las notificaciones de Slack, o inyectar los secretos de Secrets Manager como `.env` en la imagen.
+description: Escribe, migra o revisa un workflow de GitHub Actions que construye una imagen Docker, la sube a ECR y la despliega en un servicio ECS, en una Lambda de contenedor, o solo publica la imagen. Úsala cuando pidan crear el `.github/workflows/*.yml` de deploy de un microservicio/API/consumer/lambda en AWS, clonar el deploy de otro repo, pasar un deploy a ARM64/Graviton, arreglar un workflow viejo (`::set-output`, sin cache, sin tag por SHA, doble `docker login`), añadir notificaciones a Slack, o inyectar secretos de Secrets Manager en el build.
 ---
 
-# Deploys de bicom en GitHub Actions
+# Deploys a AWS desde GitHub Actions
 
-Los ~45 workflows de `bicom/github` son el mismo esqueleto repetido con tres finales
-distintos. Esta skill fija ese esqueleto, dice qué cambia en cada variante y lista la
-deuda concreta que arrastran los repos viejos.
-
-Los dos workflows de referencia — los únicos con cache, tag por SHA y `provenance:false` —
-son `bicom-ms-stock-closing` (ECS) y `bicom-ms-stock-closing-lambda-cron` (Lambda). Cuando
-haya duda, gana lo que hacen ellos, no lo que hace la mayoría.
-
-## Constantes de la organización
-
-No las inventes ni las preguntes: son iguales en todos los repos.
-
-| Qué               | Valor                                                         |
-| ----------------- | ------------------------------------------------------------- |
-| Región            | `us-east-2`                                                   |
-| Cuenta AWS        | `701355173252`                                                |
-| Credenciales      | `secrets.AWS_ACCESS_KEY`, `secrets.AWS_SECRET_ACCESS_KEY`     |
-| Webhook Slack     | `secrets.SLACK_CHANNEL_BICOM` → env `SLACK_WEBHOOK_URL`       |
-| Canal de inicio   | `#github-actions-bicom-oficial`                               |
-| Canal de cierre   | `#workflows`                                                  |
-| Repos Go privados | `secrets.GH_USERNAME`, `secrets.GH_ACCESS_TOKEN` (build-args) |
-| Concurrency       | `group: ci-${{ github.ref }}`, `cancel-in-progress: true`     |
-| Permisos          | `permissions: contents: read`                                 |
-| Timeout           | 15 min (ECS/imagen), 25 min (Lambda o build con Go)           |
+Un deploy de contenedor a AWS es siempre el mismo esqueleto — checkout, credenciales,
+login a ECR, build+push, actualizar el destino, notificar — con tres finales distintos.
+Esta skill fija ese esqueleto, dice qué cambia en cada variante y lista los errores que
+solo aparecen en producción.
 
 ## Elegir plantilla
 
-| Destino                                     | Plantilla                   | Señal en el repo                                    |
-| ------------------------------------------- | --------------------------- | --------------------------------------------------- |
-| Servicio ECS (API, front Next.js, consumer) | `templates/ecs-service.yml` | hay `ECS_CLUSTER` / task definition                 |
-| Lambda como imagen de contenedor            | `templates/lambda.yml`      | `Dockerfile` con base `public.ecr.aws/lambda/...`   |
-| Imagen base (php-fpm, nginx, ecommerce)     | `templates/ecr-image.yml`   | nadie la despliega: otros repos la usan como `FROM` |
+| Destino                             | Plantilla                   | Señal en el repo                                    |
+| ----------------------------------- | --------------------------- | --------------------------------------------------- |
+| Servicio ECS (API, front, consumer) | `templates/ecs-service.yml` | hay cluster y task definition                       |
+| Lambda como imagen de contenedor    | `templates/lambda.yml`      | `Dockerfile` con base `public.ecr.aws/lambda/...`   |
+| Imagen base / solo publicar         | `templates/ecr-image.yml`   | nadie la despliega: otros repos la usan como `FROM` |
 
 Sustituye todo lo que va entre `<...>`. Nada más.
 
-## Datos que hay que averiguar antes de escribir
+## Antes de escribir: fija las convenciones de la organización
 
-No adivines: cada uno tiene un comando que lo responde. Si no hay credenciales AWS a mano,
-cópialos del workflow del repo hermano y **dilo explícitamente en el reporte**.
+Estos valores no se deducen del código y cambian por empresa. **Sácalos del workflow de un
+repo hermano** — el que más se parezca al que estás tocando — y no los inventes:
+
+| Qué                                                            | Dónde mirar                                            |
+| -------------------------------------------------------------- | ------------------------------------------------------ |
+| Región y cuenta AWS                                            | `env:` de cualquier workflow existente                 |
+| Nombre de los secrets de credenciales                          | el paso `configure-aws-credentials`                    |
+| Webhook y canales de Slack                                     | los pasos `act10ns/slack`                              |
+| Convención de nombres (ECR, cluster, servicio, TD, contenedor) | el `env:` del repo hermano                             |
+| Rama que dispara producción                                    | el `on: push:` del repo hermano — no siempre es `main` |
+
+Si no hay repo hermano, pregunta por región, cuenta y nombres de los secrets: son cinco
+datos y adivinarlos produce un workflow que falla en el primer push.
+
+## Datos que hay que averiguar del entorno
+
+Cada uno tiene un comando que lo responde. Si no hay credenciales AWS a mano, cópialos del
+repo hermano y **dilo explícitamente en el reporte**.
 
 ```bash
-# Arquitectura real de la task definition (esto decide --platform, no el cluster)
-aws ecs describe-task-definition --task-definition <TD> --region us-east-2 \
+# Arquitectura real de la task definition (esto decide --platform, no el nombre del cluster)
+aws ecs describe-task-definition --task-definition <TD> --region <region> \
   --query 'taskDefinition.{arch:runtimePlatform.cpuArchitecture,containers:containerDefinitions[].name}'
 
-# Nombre exacto del contenedor (CONTAINER_NAME) — un typo aquí hace un deploy verde que no cambia nada
-aws ecs describe-services --cluster <CLUSTER> --services <SERVICE> --region us-east-2 \
+# Nombre exacto del contenedor: un typo aquí da un deploy verde que no cambia nada
+aws ecs describe-services --cluster <CLUSTER> --services <SERVICE> --region <region> \
   --query 'services[0].taskDefinition'
 
-# ARN completo del secreto (lleva sufijo aleatorio: `-NMjPni`, no se puede escribir de memoria)
-aws secretsmanager list-secrets --region us-east-2 --query 'SecretList[].[Name,ARN]' --output text
+# ARN del secreto (lleva sufijo aleatorio: no se puede escribir de memoria)
+aws secretsmanager list-secrets --region <region> --query 'SecretList[].[Name,ARN]' --output text
 
-# Arquitectura actual de la Lambda
-aws lambda get-function-configuration --function-name <fn> --region us-east-2 \
+# Arquitectura y entrypoint actuales de la Lambda
+aws lambda get-function-configuration --function-name <fn> --region <region> \
   --query '{arch:Architectures,entrypoint:ImageConfigResponse}'
 ```
 
-`reference/inventario.md` tiene la tabla de los 45 workflows existentes (rama, ECR, cluster,
-servicio, TD, contenedor, secreto, lambda). Úsala para copiar convenciones de nombres y para
-saber qué repo es el hermano más parecido.
-
 ## Reglas que no se negocian
 
-- **Etiqueta por SHA además de `latest`.** Casi todos los repos publican solo `:latest`: con eso
-  un rollback obliga a reconstruir y a rezar por que el commit anterior compile igual. `:${{ github.sha }}`
-  y desplegar por ese tag convierte el rollback en apuntar a la imagen anterior.
-- **`--platform` tiene que coincidir con la task definition.** El cluster no lo decide:
-  dentro de `BICOM-ECS-APIs` conviven servicios arm64 (api-go, ml-api, api-sii) y amd64
-  (api-frontend, control-apibh). Una imagen amd64 en una TD arm64 arranca y muere en bucle
-  con `exec format error`, y `wait-for-service-stability` lo transforma en un job colgado 10
-  minutos antes de fallar.
-- **QEMU solo si la etapa final ejecuta algo.** Con Go la etapa builder cross-compila
-  (`--platform=$BUILDPLATFORM`) y la final solo copia → `docker/setup-qemu-action` sobra y
-  suma minutos. Con Node/TS o PHP, la etapa target sí corre `npm ci` / `composer install`:
-  ahí QEMU es obligatorio (`platforms: linux/arm64`).
-- **`cache-from/to: type=gha, mode=max`.** Solo 4 de 45 workflows lo tienen. Es la diferencia
-  entre un deploy de 2 minutos y uno de 8, y no cuesta nada.
+- **Etiqueta por SHA además de `latest`.** Publicar solo `:latest` convierte el rollback en
+  reconstruir y rezar por que el commit anterior compile igual. Con `:${{ github.sha }}` y
+  desplegando por ese tag, el rollback es apuntar a la imagen anterior.
+- **`--platform` tiene que coincidir con la task definition.** El cluster no lo decide: un
+  mismo cluster puede tener servicios arm64 y amd64. Una imagen amd64 en una TD arm64 arranca
+  y muere en bucle con `exec format error`, y `wait-for-service-stability` lo convierte en un
+  job colgado diez minutos antes de fallar.
+- **QEMU solo si la etapa final del Dockerfile ejecuta algo.** Con Go la etapa builder
+  cross-compila (`--platform=$BUILDPLATFORM`) y la final solo copia → `docker/setup-qemu-action`
+  sobra y suma minutos. Con Node/TS o PHP, la etapa target sí corre `npm ci` /
+  `composer install`: ahí QEMU es obligatorio.
+- **`cache-from/to: type=gha, mode=max`.** Es la diferencia entre un deploy de dos minutos y
+  uno de ocho, y no cuesta nada. `mode=max` cachea también las capas intermedias del builder,
+  que es donde está el trabajo caro.
 - **`aws-actions/amazon-ecr-login@v2` ya deja hecho el `docker login`.** Repetir
-  `aws ecr get-login-password | docker login` después es ruido que aparece en 8 repos.
+  `aws ecr get-login-password | docker login` después es ruido heredado de copiar y pegar.
 - **La task definition se lee siempre de la familia, sin `:revision`.**
   `describe-task-definition --task-definition <FAMILIA>` devuelve la última ACTIVE, así el
-  deploy respeta un cambio de CPU/memoria/rol hecho a mano en la consola en vez de pisarlo.
+  deploy respeta un cambio de CPU/memoria/rol hecho en la consola en vez de pisarlo.
 - **`wait-for-service-stability: true`.** Sin esto el job da verde cuando AWS _acepta_ el
-  deploy, no cuando la tarea queda viva; un crash loop pasa desapercibido.
-- **Consumers: `minimumHealthyPercent = 0` en el servicio ECS.** Es config del servicio, no
-  del workflow, pero sin eso el redeploy solapa dos instancias procesando el mismo tenant.
+  deploy, no cuando la tarea queda viva: un crash loop pasa desapercibido.
+- **Consumers de cola: `minimumHealthyPercent = 0` en el servicio.** Es config del servicio,
+  no del workflow, pero sin eso el redeploy solapa dos instancias procesando lo mismo.
 - **Lambda: `--provenance=false --sbom=false`, `--architectures` y `wait function-updated`.**
-  Lambda rechaza los manifests OCI con attestations que buildx adjunta por defecto
+  Lambda rechaza los manifests OCI con las attestations que buildx adjunta por defecto
   (_"The image manifest, config or layer media type ... is not supported"_). Sin
   `--architectures` la función sigue en la arquitectura vieja y la imagen nueva no arranca.
   Sin el `wait`, cualquier `update-function-configuration` posterior falla con
@@ -100,10 +92,16 @@ saber qué repo es el hermano más parecido.
 - **Una Lambda no lleva multi-arch.** Una sola arquitectura: `arm64` (Graviton, ~20% más
   barato) salvo que la función ya sea x86_64 y no se quiera migrar en el mismo PR.
 - **`$GITHUB_OUTPUT`, nunca `::set-output`.** Está deprecado desde 2023 y ya avisa en los logs.
+- **`concurrency: group: ci-${{ github.ref }}` con `cancel-in-progress`.** Sin eso, dos pushes
+  seguidos despliegan en paralelo y gana el que termine último, que no es el más nuevo.
+- **`permissions: contents: read`** y un `timeout-minutes` explícito (15 basta; 25 si el job
+  compila Go o construye una Lambda).
 
-## Secretos → `.env` horneado en la imagen
+## Configuración: `.env` horneado vs. secrets de la task definition
 
-Es el patrón de la casa y hay que mantenerlo por coherencia, pero conviene saber qué implica:
+Hay dos patrones y conviene no mezclarlos dentro de un mismo equipo.
+
+**A) Bajar el secreto en el workflow y hornearlo en la imagen** (`templates/ecs-service.yml`):
 
 ```yaml
 - run:
@@ -114,42 +112,34 @@ Es el patrón de la casa y hay que mantenerlo por coherencia, pero conviene sabe
 
 - El Dockerfile hace `COPY .env* /app/` **al final**, para que un cambio de secreto no
   invalide las capas caras de compilación. El glob evita que el build local reviente sin `.env`.
-- Por eso las task definitions de bicom tienen `environment: []` y `secrets: []`: no hay que
-  tocarlas al desplegar.
+- La task definition queda con `environment: []` y `secrets: []`: no hay que tocarla al desplegar.
 - **`.env` no puede estar en `.dockerignore`.** Si alguien lo agrega "por seguridad", el
   contenedor arranca sin configuración y el fallo aparece en runtime, no en el build.
 - Nunca imprimas el `.env` en el log; como mucho `wc -l`.
-- Trade-off real: el secreto queda horneado en cada imagen de ECR, así que rotarlo obliga a
-  reconstruir y quien pueda hacer `docker pull` del repo ECR lo lee. La alternativa es
-  `secrets:` en la task definition (valueFrom del ARN). No lo cambies por tu cuenta: es un
-  cambio de plataforma para todos los servicios, propónlo aparte.
-- Varios repos usan `--region $AWS_DEFAULT_REGION` en ese paso. Funciona porque
-  `configure-aws-credentials` exporta esa variable, pero escribe `$AWS_REGION`, que sí está
-  declarada en el `env:` del workflow.
+- Coste real: el secreto queda dentro de cada imagen de ECR, así que rotarlo obliga a
+  reconstruir y quien pueda hacer `docker pull` del repositorio lo lee.
 
-## Slack
+**B) `secrets:` en la task definition** (`valueFrom` con el ARN): el contenedor recibe las
+variables al arrancar, la imagen queda limpia y rotar el secreto no exige rebuild. Es la
+opción preferible en verde, pero **cambiar de A a B es un cambio de plataforma para todos los
+servicios**: propónlo aparte, nunca colado en un PR de otra cosa.
 
-Dos pasos, siempre con `if: always()`: uno al principio con `status: starting` al canal
-`#github-actions-bicom-oficial`, y uno al final con `status: ${{ job.status }}` y
-`steps: ${{ toJson(steps) }}` a `#workflows`. El mensaje de inicio dice el servicio concreto
-("Starting Deploy MS Stock Closing"), no "Starting Deploy MS Bicom" copiado del vecino —
-con 45 repos notificando al mismo canal, un mensaje genérico no sirve para nada.
+Si el workflow usa `--region $AWS_DEFAULT_REGION` en ese paso, funciona porque
+`configure-aws-credentials` exporta esa variable — pero escribe `$AWS_REGION`, que sí está
+declarada en el `env:` del workflow.
 
-## Deuda conocida (para revisiones y migraciones)
+## Notificaciones
 
-Al tocar uno de estos repos, arregla de paso lo que aplique y dilo en el PR:
+Dos pasos con `act10ns/slack@v2`, ambos con `if: always()`: uno al principio con
+`status: starting` y otro al final con `status: ${{ job.status }}` y
+`steps: ${{ toJson(steps) }}`. El mensaje de inicio nombra el servicio concreto — cuando
+decenas de repos notifican al mismo canal, "Starting deploy" copiado del vecino no sirve
+para nada.
 
-| Problema                                                                    | Repos                                                                                                                                                                                               |
-| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `::set-output` deprecado                                                    | `bicom-api-dte` (x2), `bicom-ms-email-reader`, `bicom-test-aws-secrets`                                                                                                                             |
-| `configure-aws-credentials@v1`                                              | `bicom-test-aws-secrets`                                                                                                                                                                            |
-| Sin bloque `concurrency`                                                    | `bicom-api-dte` (x2), `bicom-ms-email-reader`, `bicom-test-aws-secrets`                                                                                                                             |
-| `docker build` plano, sin buildx ni cache                                   | `bicom-crt-frontend`, `bicom-lambda-rcof`, `bicom-duemint-webhook-lambda`, `bicom-api-frontend`, `bicom-licitaciones-mp`                                                                            |
-| `docker login` duplicado tras `amazon-ecr-login`                            | los 5 anteriores + `bicom-contabilidad-front` (x2), `bicom-contabilidad-rp-daily-book`, `bicom-rp-pos-authorizations`, `bicom-duemint-cron-lambda-go`, `bicom-contabilidad-general-balance-report`  |
-| Solo tag `:latest` (sin rollback)                                           | todos menos `bicom-ms-stock-closing`, `bicom-ms-stock-closing-lambda-cron`, `bicom-crt-stage1`, `bicom-crt-stage3`, `bicom-api-dte`, `bicom-ms-email-reader`, `bicom-ecommerce-v2`                  |
-| Sin `cache-from/to: type=gha`                                               | todos menos los 4 de referencia                                                                                                                                                                     |
-| Lambda sin `--architectures` / `wait function-updated` / `provenance=false` | `bicom-lambda-rcof`, `bicom-duemint-webhook-lambda`, `bicom-duemint-cron-lambda-go`, `bicom-rp-pos-authorizations`, `bicom-contabilidad-rp-daily-book`, `bicom-contabilidad-general-balance-report` |
-| QEMU innecesario en repos Go                                                | `bicom-api-go`, `bicom-api-bh-go`, `bicom-ms-logistic-pdf-go`, `bicom-api-sii`                                                                                                                      |
+## Auditar un workflow existente
+
+`reference/auditoria.md` tiene los comandos `grep` para detectar cada problema y qué
+sustituir en cada caso. Al tocar un repo, arregla de paso lo que aplique y dilo en el PR.
 
 Migrar el tag a SHA cambia el contrato de rollback del equipo (ya no basta con "redeploy de
 `latest`"): menciónalo al proponerlo, no lo cueles.
@@ -165,13 +155,13 @@ docker buildx build --platform linux/arm64 --load -t check:local .
 docker image inspect check:local --format '{{.Architecture}}'   # -> arm64
 
 # Post-deploy ECS: la revisión nueva corre y no está reciclando tareas
-aws ecs describe-services --cluster <CLUSTER> --services <SERVICE> --region us-east-2 \
+aws ecs describe-services --cluster <CLUSTER> --services <SERVICE> --region <region> \
   --query 'services[0].{td:taskDefinition,running:runningCount,desired:desiredCount,events:events[0:3].message}'
 
-# Post-deploy Lambda: la imagen y la arquitectura quedaron como se esperaba
-aws lambda get-function-configuration --function-name <fn> --region us-east-2 \
+# Post-deploy Lambda: imagen y arquitectura quedaron como se esperaba
+aws lambda get-function-configuration --function-name <fn> --region <region> \
   --query '{arch:Architectures,state:State,update:LastUpdateStatus}'
 ```
 
 Si no pudiste correr nada de esto (sin credenciales, sin daemon de Docker), dilo tal cual:
-un `--platform` equivocado no lo detecta la revisión de YAML, lo detecta producción.
+un `--platform` equivocado no lo detecta la revisión del YAML, lo detecta producción.
