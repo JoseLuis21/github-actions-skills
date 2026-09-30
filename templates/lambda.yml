@@ -70,6 +70,18 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # FROM public.ecr.aws/... sin login es un pull anonimo con cuota por IP, y esa
+      # IP la comparten todos los runners de GitHub: tarde o temprano el build falla
+      # con 429 "Data limit exceeded". ECR Public solo emite tokens en us-east-1.
+      # El usuario IAM necesita ecr-public:GetAuthorizationToken y
+      # sts:GetServiceBearerToken (ver "Permisos IAM" en SKILL.md).
+      - name: Login to Amazon ECR Public
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+        env:
+          AWS_REGION: us-east-1
+
       - name: Build, tag, and push image to Amazon ECR
         id: build-image
         env:

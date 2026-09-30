@@ -97,7 +97,28 @@ Y el `container-name` debe ser idéntico al de la task definition: si no coincid
 no reemplaza la imagen, el deploy sale verde y no cambia nada. Verifícalo con
 `aws ecs describe-task-definition --query 'taskDefinition.containerDefinitions[].name'`.
 
-## 9. Incoherencias que solo se ven mirando varios repos a la vez
+## 9. Imagen base de `public.ecr.aws` sin login
+
+```bash
+grep -rln 'public.ecr.aws' Dockerfile* */Dockerfile* 2>/dev/null   # ¿algún FROM público?
+grep -rLn 'registry-type: public' .github/workflows/*.yml           # workflows sin login público
+```
+→ si el Dockerfile baja de `public.ecr.aws` y el workflow no tiene el login público, añadir
+tras el login privado:
+```yaml
+- name: Login to Amazon ECR Public
+  uses: aws-actions/amazon-ecr-login@v2
+  with:
+    registry-type: public
+  env:
+    AWS_REGION: us-east-1
+```
+Sin esto el pull es anónimo y falla al azar con `429 ... Data limit exceeded`. **Antes de
+mergearlo, verifica la política IAM del usuario** (`simulate-principal-policy`, ver
+"Permisos IAM" en `SKILL.md`): sin ella el paso falla siempre con `not authorized to perform:
+ecr-public:GetAuthorizationToken`.
+
+## 10. Incoherencias que solo se ven mirando varios repos a la vez
 
 Vale la pena revisarlas de a una, no automatizarlas: casi siempre hay una razón histórica
 detrás, y "arreglarlas" sin preguntar rompe algo.

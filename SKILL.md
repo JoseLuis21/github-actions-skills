@@ -1,6 +1,6 @@
 ---
 name: github-actions-skills
-description: Escribe, migra o revisa un workflow de GitHub Actions que construye una imagen Docker, la sube a ECR y la despliega en un servicio ECS, en una Lambda de contenedor, o solo publica la imagen. Úsala cuando pidan crear el `.github/workflows/*.yml` de deploy de un microservicio/API/consumer/lambda en AWS, clonar el deploy de otro repo, pasar un deploy a ARM64/Graviton, arreglar un workflow viejo (`::set-output`, sin cache, sin tag por SHA, doble `docker login`), añadir notificaciones a Slack, o inyectar secretos de Secrets Manager en el build.
+description: Escribe, migra o revisa un workflow de GitHub Actions que construye una imagen Docker, la sube a ECR y la despliega en un servicio ECS, en una Lambda de contenedor, o solo publica la imagen. Úsala cuando pidan crear el `.github/workflows/*.yml` de deploy de un microservicio/API/consumer/lambda en AWS, clonar el deploy de otro repo, pasar un deploy a ARM64/Graviton, arreglar un workflow viejo (`::set-output`, sin cache, sin tag por SHA, doble `docker login`), añadir notificaciones a Slack, inyectar secretos de Secrets Manager en el build, o arreglar un build que falla con `429 Too Many Requests` / `Data limit exceeded` al bajar una imagen base de `public.ecr.aws`.
 ---
 
 # Deploys a AWS desde GitHub Actions
@@ -58,6 +58,48 @@ aws lambda get-function-configuration --function-name <fn> --region <region> \
   --query '{arch:Architectures,entrypoint:ImageConfigResponse}'
 ```
 
+## Permisos IAM del usuario del workflow
+
+El usuario (o rol) cuyas llaves están en los secrets del workflow necesita, además de lo que
+ya use para ECR/ECS/Lambda, esto para el login a ECR Public:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["ecr-public:GetAuthorizationToken", "sts:GetServiceBearerToken"],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+El nombre del usuario no está en el repo (los secrets no se leen): sácalo del error de un job
+(`User: arn:aws:iam::<cuenta>:user/<USUARIO> is not authorized...`) o pregúntalo. Suele ser
+**un mismo usuario para todos los repos** de la organización, así que la política se agrega
+una vez y sirve para todos.
+
+```bash
+# ¿Ya lo tiene? (allowed en las dos = listo; implicitDeny = falta)
+aws iam simulate-principal-policy \
+  --policy-source-arn arn:aws:iam::<cuenta>:user/<USUARIO> \
+  --action-names ecr-public:GetAuthorizationToken sts:GetServiceBearerToken \
+  --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+
+# Si falta: política inline (idempotente, reemplaza si ya existe con ese nombre)
+aws iam put-user-policy --user-name <USUARIO> --policy-name ecr-public-pull \
+  --policy-document file://ecr-public-pull.json
+aws iam get-user-policy --user-name <USUARIO> --policy-name ecr-public-pull
+```
+
+Tocar IAM es un cambio fuera del repo: confírmalo con el usuario antes de correr el
+`put-user-policy`. Si no hay credenciales con permisos de IAM, entrega el JSON y los comandos
+y **dilo en el reporte**: el workflow con el paso de ECR Public no debe mergearse sin la
+política puesta. Tras agregarla, IAM tarda unos segundos en propagar; basta con "Re-run
+failed jobs", sin commit nuevo.
+
 ## Reglas que no se negocian
 
 - **Etiqueta por SHA además de `latest`.** Publicar solo `:latest` convierte el rollback en
@@ -76,6 +118,17 @@ aws lambda get-function-configuration --function-name <fn> --region <region> \
   que es donde está el trabajo caro.
 - **`aws-actions/amazon-ecr-login@v2` ya deja hecho el `docker login`.** Repetir
   `aws ecr get-login-password | docker login` después es ruido heredado de copiar y pegar.
+- **Si algún `FROM` sale de `public.ecr.aws`, login también a ECR Public.** El login de
+  arriba es solo para el ECR privado. Sin el segundo, el pull de la imagen base es anónimo,
+  la cuota de ECR Public para anónimos es **por IP** y los runners `ubuntu-latest` comparten
+  IPs con miles de repos ajenos: el build falla al azar con `429 Too Many Requests /
+  toomanyrequests: Data limit exceeded` en `load metadata for public.ecr.aws/...`, y la cache
+  `type=gha` no lo evita porque buildx resuelve el manifest igual. El paso es
+  `amazon-ecr-login@v2` con `registry-type: public` y `AWS_REGION: us-east-1` en su `env:`
+  (ECR Public solo emite tokens ahí, sea cual sea la región del resto). Las plantillas ya lo
+  traen; **antes de dejarlo, asegura la política IAM** (sección siguiente): sin ella el deploy
+  pasa de fallar a veces a fallar siempre, con `not authorized to perform:
+  ecr-public:GetAuthorizationToken`. No lo tapes con `continue-on-error`: se arregla en IAM.
 - **La task definition se lee siempre de la familia, sin `:revision`.**
   `describe-task-definition --task-definition <FAMILIA>` devuelve la última ACTIVE, así el
   deploy respeta un cambio de CPU/memoria/rol hecho en la consola en vez de pisarlo.
